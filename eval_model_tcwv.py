@@ -4,15 +4,19 @@ import pytorch_lightning as pl
 from lightning_fabric.utilities import seed
 from argparse import ArgumentParser
 import time
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as pltc
 import wandb
+import yaml
+import numpy as np
 
 from neural_lam.models.graph_lam import GraphLAM
 from neural_lam.models.hi_lam import HiLAM
 from neural_lam.models.hi_lam_parallel import HiLAMParallel
 
-from neural_lam.weather_dataset import WeatherDataset
-from neural_lam import constants, utils
+from neural_lam.tcwv_dataset import TCWVDataset
+from neural_lam import utils
+from neural_lam import constants_tcwv as constants
+from neural_lam.models.callbacks import PredictionCallback
 
 MODELS = {
     "graph_lam": GraphLAM,
@@ -24,7 +28,7 @@ def main():
     parser = ArgumentParser(description='Train or evaluate NeurWP models for LAM')
 
     # General options
-    parser.add_argument('--dataset', type=str, default="meps_example",
+    parser.add_argument('--dataset', type=str, default="tcwv05",
         help='Dataset, corresponding to name in data directory (default: meps_example)')
     parser.add_argument('--model', type=str, default="graph_lam",
         help='Model architecture to train/evaluate (default: graph_lam)')
@@ -33,7 +37,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42,
         help='random seed (default: 42)')
     parser.add_argument('--n_workers', type=int, default=0,
-        help='Number of workers in data loader (default: 1)')
+        help='Number of workers in data loader (default: 4)')
     parser.add_argument('--epochs', type=int, default=200,
         help='upper epoch limit (default: 200)')
     parser.add_argument('--batch_size', type=int, default=4,
@@ -46,9 +50,9 @@ def main():
         help='Numerical precision to use for model (32/16/bf16) (default: 32)')
 
     # Model architecture
-    parser.add_argument('--graph', type=str, default="multiscale",
+    parser.add_argument('--graph', type=str, default="tropic",
         help='Graph to load and use in graph-based model (default: multiscale)')
-    parser.add_argument('--hidden_dim', type=int, default=64,
+    parser.add_argument('--hidden_dim', type=int, default=32,
         help='Dimensionality of all hidden representations (default: 64)')
     parser.add_argument('--hidden_layers', type=int, default=1,
         help='Number of hidden layers in all MLPs (default: 1)')
@@ -64,7 +68,7 @@ def main():
         help='Train only on control member of ensemble data (default: 0 (False))')
     parser.add_argument('--loss', type=str, default="mse",
         help='Loss function to use (default: mse)')
-    parser.add_argument('--step_length', type=int, default=3,
+    parser.add_argument('--step_length', type=int, default=1,
         help='Step length in hours to consider single time step 1-3 (default: 3)')
     parser.add_argument('--lr', type=float, default=1e-3,
         help='learning rate (default: 0.001)')
@@ -89,23 +93,29 @@ def main():
     # Set seed
     seed.seed_everything(args.seed)
 
+    # load config
+    config_path = '/root/Desktop/machine_learning/neural-lam/data/tcwv05/task.yaml'
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    n_t = config['train']['n_t']
+
     # Load data
     train_loader = torch.utils.data.DataLoader(
-            WeatherDataset(args.dataset, pred_length=args.ar_steps, split="train",
-                subsample_step=args.step_length, subset=bool(args.subset_ds),
-                control_only=args.control_only),
+            TCWVDataset(args.dataset, pred_length=args.ar_steps, split="train",
+                subsample_step=args.step_length, subset=False,
+                ),
             args.batch_size, shuffle=True, num_workers=args.n_workers)
-    max_pred_length = (65 // args.step_length) - 2 # 19
+    max_pred_length = 20 # 5 days
     val_loader = torch.utils.data.DataLoader(
-            WeatherDataset(args.dataset, pred_length=max_pred_length, split="val",
-                subsample_step=args.step_length, subset=bool(args.subset_ds),
-                control_only=args.control_only),
+            TCWVDataset(args.dataset, pred_length=max_pred_length, split="val",
+                subsample_step=args.step_length, subset=False,
+                ),
             args.batch_size, shuffle=False, num_workers=args.n_workers)
 
     # Instatiate model + trainer
     if torch.cuda.is_available():
-        device_name = "gpu"
-        torch.set_float32_matmul_precision("high") # Allows using Tensor Cores on A100s
+        device_name = "cuda"
+        # torch.set_float32_matmul_precision("high") # Allows using Tensor Cores on A100s # we don't have A100s
     else:
         device_name = "cpu"
 
@@ -128,18 +138,19 @@ def main():
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
             dirpath=f"saved_models/{run_name}", filename="min_val_loss",
             monitor="val_mean_loss", mode="min", save_last=True)
+    prediction_callback = PredictionCallback()
+
     logger = pl.loggers.WandbLogger(project=constants.wandb_project, name=run_name,
             config=args)
-    trainer = pl.Trainer(max_epochs=args.epochs, #deterministic=True,
-                         devices = [0],
+    trainer = pl.Trainer(devices = [0],
                         #  strategy="ddp",
-            accelerator=device_name,
-            logger=logger,
-            log_every_n_steps=1,
-            callbacks=[checkpoint_callback], check_val_every_n_epoch=args.val_interval,
-            precision=args.precision)
+                        accelerator=device_name,
+                        logger=logger,
+                        log_every_n_steps=1,
+                        callbacks=[prediction_callback], 
+                        precision=args.precision)
 
-    # # Only init once, on rank 0 only
+    # Only init once, on rank 0 only
     if trainer.global_rank == 0:
         utils.init_wandb_metrics(logger) # Do after wandb.init
 
@@ -147,13 +158,17 @@ def main():
         if args.eval == "val":
             eval_loader = val_loader
         else: # Test
-            eval_loader = torch.utils.data.DataLoader(WeatherDataset(args.dataset,
+            eval_loader = torch.utils.data.DataLoader(TCWVDataset(args.dataset,
                 pred_length=max_pred_length, split="test",
                 subsample_step=args.step_length, subset=bool(args.subset_ds)),
             args.batch_size, shuffle=False, num_workers=args.n_workers)
 
         print(f"Running evaluation on {args.eval}")
-        trainer.test(model=model, dataloaders=eval_loader)
+        model.eval()
+        predictions = trainer.test(model=model, dataloaders=eval_loader)
+        predictions = np.array(predictions)
+        np.save('predictions.npy', predictions)
+
     else:
         # Train model
         trainer.fit(model=model, train_dataloaders=train_loader,

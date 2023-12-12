@@ -2,7 +2,7 @@ import torch
 import torch_geometric as pyg
 
 from neural_lam import utils
-from neural_lam.models.ar_model import ARModel
+from neural_lam.models.ar_mode_no_border import ARModel
 from neural_lam.interaction_net import InteractionNet
 
 class BaseGraphModel(ARModel):

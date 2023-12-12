@@ -1,0 +1,1 @@
+python eval_model_tcwv.py --eval test --load '/root/Desktop/machine_learning/neural-lam/saved_models/graph_lam-4x32-12_06_14-5923/min_val_loss.ckpt' --n_example_pred 1

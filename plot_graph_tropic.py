@@ -20,7 +20,8 @@ def main():
         help='Name of .html file to save interactive plot to (default: None)')
     parser.add_argument('--show_axis', type=int, default=0,
         help='If the axis should be displayed (default: 0 (No))')
-
+    parser.add_argument('--pos_file', type=str, 
+        help='provide a file with node positions (default: None)')
     args = parser.parse_args()
 
     # Load graph data
