@@ -60,7 +60,7 @@ def main():
         help='Aggregation to use for m2m processor GNN layers (sum/mean) (default: sum)')
 
     # Training options
-    parser.add_argument('--ar_steps', type=int, default=1,
+    parser.add_argument('--ar_steps', type=int, default=5,
         help='Number of steps to unroll prediction for in loss (1-19) (default: 1)')
     parser.add_argument('--control_only', type=int, default=0,
         help='Train only on control member of ensemble data (default: 0 (False))')
